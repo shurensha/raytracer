@@ -14,11 +14,15 @@ fn vec3_splat(scalar: f32) vec3 {
 }
 
 fn length(u: vec3) f32 {
-    return math.sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+    return math.sqrt(length_squared(u));
 }
 
 fn unit_vector(u: vec3) vec3 {
     return u / vec3_splat(length(u));
+}
+
+fn length_squared(u: vec3) f32 {
+    return u[0] * u[0] + u[1] * u[1] + u[2] * u[2];
 }
 
 fn write_color(out: anytype, c: color) !void {
@@ -52,13 +56,16 @@ const Ray = struct {
     }
 
     pub fn at(self: *const Ray, t: f32) point3 {
-        return self.orig + t * self.dir;
+        return self.orig + vec3_splat(t) * self.dir;
     }
 
     pub fn ray_color(self: *const Ray) color {
-        if (hit_sphere(point3{ 0, 0, -1.0 }, 0.5, self.*)) {
-            return color{ 1, 0, 0 };
+        const t = hit_sphere(point3{ 0, 0, -1.0 }, 0.5, self.*);
+        if (t > 0.0) {
+            const N = unit_vector(self.*.at(t) - vec3{ 0, 0, -1 });
+            return vec3_splat(0.5) * color{ N[0] + 1.0, N[1] + 1.0, N[2] + 1.0 };
         }
+
         const unit_direction = unit_vector(self.direction());
         // map -1 to 1 to 0 to 1
         const a = 0.5 * (unit_direction[1] + 1.0);
@@ -67,13 +74,19 @@ const Ray = struct {
     }
 };
 
-fn hit_sphere(center: point3, radius: f32, r: Ray) bool {
+// find t of R = Q + td, which makes R intersect the sphere
+fn hit_sphere(center: point3, radius: f32, r: Ray) f32 {
     const oc = center - r.origin();
     const a = dot(r.direction(), r.direction());
-    const b = dot(vec3_splat(-2.0) * r.direction(), oc);
-    const c = dot(oc, oc) - radius * radius;
-    const discriminant = b * b - 4 * a * c;
-    return (discriminant >= 0);
+    const h = dot(r.direction(), oc);
+    const c = length_squared(oc) - radius * radius;
+    const discriminant = h * h - a * c;
+
+    if (discriminant < 0) {
+        return -1.0;
+    } else {
+        return (h - math.sqrt(discriminant)) / a;
+    }
 }
 
 pub fn main() !void {
@@ -108,7 +121,6 @@ pub fn main() !void {
             const pixel_center = pixel00_loc +
                 (vec3_splat(@floatFromInt(i)) * pixel_delta_u) + (vec3_splat(@floatFromInt(j)) * pixel_delta_v);
             const ray_direction = pixel_center - camera_center;
-            std.log.info("pix: ({d:.2},{d:.2},{d:.2}), ray: ({d:.2}, {d:.2}, {d:.2})", .{ pixel_center[0], pixel_center[1], pixel_center[2], ray_direction[0], ray_direction[1], ray_direction[2] });
             const r = Ray.init(camera_center, ray_direction);
 
             const pixel_color = r.ray_color();
