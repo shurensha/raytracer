@@ -68,6 +68,95 @@ fn write_color(out: anytype, c: color) !void {
     try out.print("{} {} {}\n", .{ rbyte, gbyte, bbyte });
 }
 
+const Camera = struct {
+    aspect_ratio: f32 = 1.0,
+    image_width: u32 = 100,
+
+    image_height: u32,
+    center: point3,
+    pixel00_loc: point3,
+    pixel_delta_u: vec3,
+    pixel_delta_v: vec3,
+
+    pub fn render(self: *Camera, world: *const Hittable) !void {
+        self.initialize();
+
+        const stdout = std.io.getStdOut().writer();
+        try stdout.print("P3\n", .{});
+        try stdout.print("{} {}\n", .{ self.image_width, self.image_height });
+        try stdout.print("255\n", .{});
+
+        for (0..self.image_height) |j| {
+            std.log.info("Scanlines remaining: {}", .{(self.image_height - j)});
+            for (0..self.image_width) |i| {
+                // each actual image pixel corresponds to a viewport pixel
+                const pixel_center = self.pixel00_loc +
+                    (vec3_splat(@floatFromInt(i)) * self.pixel_delta_u) +
+                    (vec3_splat(@floatFromInt(j)) * self.pixel_delta_v);
+
+                const ray_direction = pixel_center - self.center;
+                const r = Ray.init(self.center, ray_direction);
+
+                const pixel_color = self.ray_color(r, world);
+
+                try write_color(&stdout, pixel_color);
+            }
+        }
+
+        std.log.info("image width: {}", .{self.image_width});
+        std.log.info("image height: {}", .{self.image_height});
+        std.log.info("camera: ({},{},{})", .{ self.center[0], self.center[1], self.center[2] });
+
+        std.log.info("Done\n", .{});
+    }
+
+    fn initialize(self: *Camera) void {
+        self.image_height = @intFromFloat(@max(1, @as(f32, @floatFromInt(self.image_width)) / self.aspect_ratio));
+        // camera
+        self.center = point3{ 0, 0, 0 };
+        const focal_length: f32 = 1.0;
+        const viewport_height: f32 = 2.0;
+        const viewport_width: f32 = viewport_height *
+            @as(f32, @floatFromInt(self.image_width)) /
+            @as(f32, @floatFromInt(self.image_height));
+
+        const viewport_u = vec3{ viewport_width, 0, 0 };
+        const viewport_v = vec3{ 0, -viewport_height, 0 };
+
+        // the space between viewport pixels in the x and y direction
+        self.pixel_delta_u = viewport_u / vec3_splat(@floatFromInt(self.image_width));
+        self.pixel_delta_v = viewport_v / vec3_splat(@floatFromInt(self.image_height));
+
+        // start from the center and get the top left point
+        const viewport_upper_left = self.center -
+            vec3{ 0, 0, focal_length } -
+            viewport_u / vec3_splat(2) -
+            viewport_v / vec3_splat(2);
+        // inset by half of pixel_delta vectically and horizontally
+        self.pixel00_loc = viewport_upper_left +
+            vec3_splat(0.5) * (self.pixel_delta_u + self.pixel_delta_v);
+    }
+
+    fn ray_color(self: *Camera, ray: Ray, world: *const Hittable) color {
+        _ = self;
+        var rec: HitRecord = undefined;
+        if (world.hit(ray, Interval.init(0, rtweekend.infinity), &rec)) {
+            return vec3_splat(0.5) * (rec.normal + color{
+                1,
+                1,
+                1,
+            });
+        }
+
+        const unit_direction = unit_vector(ray.direction());
+        // map -1 to 1 to 0 to 1
+        const a = 0.5 * (unit_direction[1] + 1.0);
+
+        return vec3_splat(1.0 - a) * color{ 1.0, 1.0, 1.0 } +
+            vec3_splat(a) * color{ 0.5, 0.7, 1.0 };
+    }
+};
+
 const Ray = struct {
     orig: point3,
     dir: vec3,
@@ -88,23 +177,6 @@ const Ray = struct {
 
     pub fn at(self: *const Ray, t: f32) point3 {
         return self.orig + vec3_splat(t) * self.dir;
-    }
-
-    pub fn ray_color(self: *const Ray, world: *Hittable) color {
-        var rec: HitRecord = undefined;
-        if (world.hit(self.*, Interval.init(0, rtweekend.infinity), &rec)) {
-            return vec3_splat(0.5) * (rec.normal + color{
-                1,
-                1,
-                1,
-            });
-        }
-
-        const unit_direction = unit_vector(self.direction());
-        // map -1 to 1 to 0 to 1
-        const a = 0.5 * (unit_direction[1] + 1.0);
-
-        return vec3_splat(1.0 - a) * color{ 1.0, 1.0, 1.0 } + vec3_splat(a) * color{ 0.5, 0.7, 1.0 };
     }
 };
 
@@ -223,11 +295,6 @@ const Sphere = struct {
 };
 
 pub fn main() !void {
-    const aspect_ratio: f32 = 16.0 / 9.0;
-    const image_width: u32 = 400;
-    const image_height = @max(1, @as(u32, @intFromFloat(@floor(image_width /
-        aspect_ratio))));
-
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
     var world_list = HittableList.init(allocator);
@@ -237,51 +304,9 @@ pub fn main() !void {
     try world_list.add(sphere1);
     try world_list.add(sphere2);
 
-    // camera
-    const focal_length: f32 = 1.0;
-    const viewport_height: f32 = 2.0;
-    const viewport_width = viewport_height * image_width / image_height;
-    const camera_center = point3{ 0, 0, 0 };
+    var cam: Camera = undefined;
+    cam.aspect_ratio = 16.0 / 9.0;
+    cam.image_width = 400;
 
-    const viewport_u = vec3{ viewport_width, 0, 0 };
-    const viewport_v = vec3{ 0, -viewport_height, 0 };
-
-    // the space between viewport pixels in the x and y direction
-    const pixel_delta_u = viewport_u / vec3_splat(image_width);
-    const pixel_delta_v = viewport_v / vec3_splat(image_height);
-
-    // start from the center and get the top left point
-    const viewport_upper_left = camera_center - vec3{ 0, 0, focal_length } - viewport_u / vec3_splat(2) - viewport_v / vec3_splat(2);
-    // inset by half of pixel_delta vectically and horizontally
-    const pixel00_loc = viewport_upper_left + vec3_splat(0.5) * (pixel_delta_u + pixel_delta_v);
-
-    const stdout = std.io.getStdOut().writer();
-    try stdout.print("P3\n", .{});
-    try stdout.print("{} {}\n", .{ image_width, image_height });
-    try stdout.print("255\n", .{});
-
-    for (0..image_height) |j| {
-        std.log.info("Scanlines remaining: {}", .{(image_height - j)});
-        for (0..image_width) |i| {
-            // each actual image pixel corresponds to a viewport pixel
-            const pixel_center = pixel00_loc +
-                (vec3_splat(@floatFromInt(i)) * pixel_delta_u) + (vec3_splat(@floatFromInt(j)) * pixel_delta_v);
-
-            const ray_direction = pixel_center - camera_center;
-            const r = Ray.init(camera_center, ray_direction);
-
-            const pixel_color = r.ray_color(&world);
-
-            try write_color(&stdout, pixel_color);
-        }
-    }
-
-    std.log.info("focal length: {}", .{focal_length});
-    std.log.info("image width: {}", .{image_width});
-    std.log.info("image height: {}", .{image_height});
-    std.log.info("viewport width: {}", .{viewport_width});
-    std.log.info("viewport height: {}", .{viewport_height});
-    std.log.info("camera: ({},{},{})", .{ camera_center[0], camera_center[1], camera_center[2] });
-
-    std.log.info("Done\n", .{});
+    try cam.render(&world);
 }
