@@ -5,6 +5,33 @@ const math = std.math;
 const assert = std.debug.assert;
 const rtweekend = @import("./rtweekend.zig");
 
+const Interval = struct {
+    min: f32 = math.inf(f32),
+    max: f32 = -math.inf(f32),
+
+    pub fn init(min: f32, max: f32) Interval {
+        return .{
+            .min = min,
+            .max = max,
+        };
+    }
+
+    pub fn size(self: *const Interval) f32 {
+        return self.max - self.min;
+    }
+
+    pub fn contains(self: *const Interval, x: f32) bool {
+        return self.min <= x and x <= self.max;
+    }
+
+    pub fn surrounds(self: *const Interval, x: f32) bool {
+        return self.min < x and x < self.max;
+    }
+
+    pub const empty = Interval.init(math.inf(f32), -std.math.inf(f64));
+    pub const univers = Interval.init(-math.inf(f32), std.math.inf(f64));
+};
+
 const vec3 = @Vector(3, f32);
 const point3 = vec3;
 const color = @Vector(3, f32);
@@ -65,7 +92,7 @@ const Ray = struct {
 
     pub fn ray_color(self: *const Ray, world: *Hittable) color {
         var rec: HitRecord = undefined;
-        if (world.hit(self.*, 0, rtweekend.infinity, &rec)) {
+        if (world.hit(self.*, Interval.init(0, rtweekend.infinity), &rec)) {
             return vec3_splat(0.5) * (rec.normal + color{
                 1,
                 1,
@@ -97,11 +124,11 @@ const Hittable = struct {
     ptr: *anyopaque,
     vtab: *const Vtab,
     const Vtab = struct {
-        hit: *const fn (self: *anyopaque, r: Ray, ray_tmin: f32, ray_tmax: f32, rec: *HitRecord) bool,
+        hit: *const fn (self: *anyopaque, r: Ray, ray_t: Interval, rec: *HitRecord) bool,
     };
 
-    pub fn hit(self: *const Hittable, r: Ray, ray_tmin: f32, ray_tmax: f32, rec: *HitRecord) bool {
-        return self.vtab.hit(self.ptr, r, ray_tmin, ray_tmax, rec);
+    pub fn hit(self: *const Hittable, r: Ray, ray_t: Interval, rec: *HitRecord) bool {
+        return self.vtab.hit(self.ptr, r, ray_t, rec);
     }
 
     pub fn init(obj: anytype) Hittable {
@@ -111,9 +138,9 @@ const Hittable = struct {
         assert(PtrInfo.Pointer.size == .One);
         assert(@typeInfo(PtrInfo.Pointer.child) == .Struct);
         const impl = struct {
-            fn hit(ptr: *anyopaque, r: Ray, ray_tmin: f32, ray_tmax: f32, rec: *HitRecord) bool {
+            fn hit(ptr: *anyopaque, r: Ray, ray_t: Interval, rec: *HitRecord) bool {
                 const self: Ptr = @ptrCast(@alignCast(ptr));
-                return self.hit(r, ray_tmin, ray_tmax, rec);
+                return self.hit(r, ray_t, rec);
             }
         };
         return .{
@@ -136,13 +163,13 @@ const HittableList = struct {
         try self.objects.append(object);
     }
 
-    pub fn hit(self: *HittableList, r: Ray, ray_tmin: f32, ray_tmax: f32, rec: *HitRecord) bool {
+    pub fn hit(self: *HittableList, r: Ray, ray_t: Interval, rec: *HitRecord) bool {
         var temp_rec: HitRecord = undefined;
         var hit_anything = false;
-        var closest_so_far = ray_tmax;
+        var closest_so_far = ray_t.max;
 
         for (self.objects.items) |object| {
-            if (object.hit(r, ray_tmin, closest_so_far, &temp_rec)) {
+            if (object.hit(r, Interval.init(ray_t.min, closest_so_far), &temp_rec)) {
                 hit_anything = true;
                 closest_so_far = temp_rec.t;
                 rec.* = temp_rec;
@@ -163,7 +190,7 @@ const Sphere = struct {
         };
     }
 
-    pub fn hit(self: *const Sphere, r: Ray, ray_tmin: f32, ray_tmax: f32, rec: *HitRecord) bool {
+    pub fn hit(self: *const Sphere, r: Ray, ray_t: Interval, rec: *HitRecord) bool {
         const oc = self.center - r.origin();
         const a = dot(r.direction(), r.direction());
         const h = dot(r.direction(), oc);
@@ -179,9 +206,9 @@ const Sphere = struct {
         var root = (h - sqrtd) / a;
 
         // check both roots
-        if (root <= ray_tmin or ray_tmax <= root) {
+        if (!ray_t.surrounds(root)) {
             root = (h + sqrtd) / a;
-            if (root <= ray_tmin or ray_tmax <= root) {
+            if (!ray_t.surrounds(root)) {
                 return false;
             }
         }
