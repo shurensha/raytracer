@@ -28,6 +28,12 @@ const Interval = struct {
         return self.min < x and x < self.max;
     }
 
+    pub fn clamp(self: *const Interval, x: f32) f32 {
+        if (x < self.min) return self.min;
+        if (x > self.max) return self.max;
+        return x;
+    }
+
     pub const empty = Interval.init(math.inf(f32), -std.math.inf(f64));
     pub const univers = Interval.init(-math.inf(f32), std.math.inf(f64));
 };
@@ -61,18 +67,21 @@ fn write_color(out: anytype, c: color) !void {
     const g = c[1];
     const b = c[2];
 
-    const rbyte = std.math.lossyCast(u8, 255.999 * r);
-    const gbyte = std.math.lossyCast(u8, 255.999 * g);
-    const bbyte = std.math.lossyCast(u8, 255.999 * b);
+    const intensity = Interval.init(0.000, 0.999);
+    const rbyte = std.math.lossyCast(u8, 256 * intensity.clamp(r));
+    const gbyte = std.math.lossyCast(u8, 256 * intensity.clamp(g));
+    const bbyte = std.math.lossyCast(u8, 256 * intensity.clamp(b));
 
     try out.print("{} {} {}\n", .{ rbyte, gbyte, bbyte });
 }
 
 const Camera = struct {
-    aspect_ratio: f32 = 1.0,
-    image_width: u32 = 100,
+    aspect_ratio: f32,
+    image_width: u32,
+    samples_per_pixel: u32,
 
     image_height: u32,
+    pixel_samples_scale: f32,
     center: point3,
     pixel00_loc: point3,
     pixel_delta_u: vec3,
@@ -89,17 +98,13 @@ const Camera = struct {
         for (0..self.image_height) |j| {
             std.log.info("Scanlines remaining: {}", .{(self.image_height - j)});
             for (0..self.image_width) |i| {
-                // each actual image pixel corresponds to a viewport pixel
-                const pixel_center = self.pixel00_loc +
-                    (vec3_splat(@floatFromInt(i)) * self.pixel_delta_u) +
-                    (vec3_splat(@floatFromInt(j)) * self.pixel_delta_v);
+                var pixel_color = color{ 0, 0, 0 };
+                for (0..self.samples_per_pixel) |_| {
+                    const r = get_ray(self, i, j);
+                    pixel_color += ray_color(self, r, world);
+                }
 
-                const ray_direction = pixel_center - self.center;
-                const r = Ray.init(self.center, ray_direction);
-
-                const pixel_color = self.ray_color(r, world);
-
-                try write_color(&stdout, pixel_color);
+                try write_color(&stdout, vec3_splat(self.pixel_samples_scale) * pixel_color);
             }
         }
 
@@ -112,6 +117,8 @@ const Camera = struct {
 
     fn initialize(self: *Camera) void {
         self.image_height = @intFromFloat(@max(1, @as(f32, @floatFromInt(self.image_width)) / self.aspect_ratio));
+
+        self.pixel_samples_scale = 1.0 / @as(f32, @floatFromInt(self.samples_per_pixel));
         // camera
         self.center = point3{ 0, 0, 0 };
         const focal_length: f32 = 1.0;
@@ -135,6 +142,20 @@ const Camera = struct {
         // inset by half of pixel_delta vectically and horizontally
         self.pixel00_loc = viewport_upper_left +
             vec3_splat(0.5) * (self.pixel_delta_u + self.pixel_delta_v);
+    }
+
+    fn get_ray(self: *Camera, i: usize, j: usize) Ray {
+        const offset = sample_square();
+        const pixel_sample = self.pixel00_loc + ((vec3_splat(@as(f32, @floatFromInt(i)) + offset[0])) * self.pixel_delta_u) + ((vec3_splat(@as(f32, @floatFromInt(j)) + offset[1])) * self.pixel_delta_v);
+
+        const ray_origin = self.center;
+        const ray_direction = pixel_sample - ray_origin;
+
+        return Ray.init(ray_origin, ray_direction);
+    }
+
+    fn sample_square() vec3 {
+        return vec3{ std.crypto.random.float(f32) - 0.5, std.crypto.random.float(f32) - 0.5, 0 };
     }
 
     fn ray_color(self: *Camera, ray: Ray, world: *const Hittable) color {
@@ -307,6 +328,7 @@ pub fn main() !void {
     var cam: Camera = undefined;
     cam.aspect_ratio = 16.0 / 9.0;
     cam.image_width = 400;
+    cam.samples_per_pixel = 100;
 
     try cam.render(&world);
 }
