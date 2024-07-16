@@ -58,8 +58,38 @@ fn unit_vector(u: vec3) vec3 {
     return u / vec3_splat(length(u));
 }
 
+fn random_in_unit_sphere() vec3 {
+    while (true) {
+        const p = random_range(-1, 1);
+        if (length_squared(p) < 1) {
+            return p;
+        }
+    }
+}
+
+fn random_unit_vector() vec3 {
+    return unit_vector(random_in_unit_sphere());
+}
+
+fn random_on_hemisphere(normal: vec3) vec3 {
+    const on_unit_sphere = random_unit_vector();
+    if (dot(on_unit_sphere, normal) > 0.0) {
+        return on_unit_sphere;
+    } else {
+        return -on_unit_sphere;
+    }
+}
+
 fn length_squared(u: vec3) f32 {
     return u[0] * u[0] + u[1] * u[1] + u[2] * u[2];
+}
+
+fn random() vec3 {
+    return vec3{ rtweekend.random_double(), rtweekend.random_double(), rtweekend.random_double() };
+}
+
+fn random_range(min: f32, max: f32) vec3 {
+    return vec3{ rtweekend.random_double_range(min, max), rtweekend.random_double_range(min, max), rtweekend.random_double_range(min, max) };
 }
 
 fn write_color(out: anytype, c: color) !void {
@@ -79,6 +109,7 @@ const Camera = struct {
     aspect_ratio: f32,
     image_width: u32,
     samples_per_pixel: u32,
+    max_depth: u32,
 
     image_height: u32,
     pixel_samples_scale: f32,
@@ -101,7 +132,7 @@ const Camera = struct {
                 var pixel_color = color{ 0, 0, 0 };
                 for (0..self.samples_per_pixel) |_| {
                     const r = get_ray(self, i, j);
-                    pixel_color += ray_color(self, r, world);
+                    pixel_color += ray_color(self, r, self.max_depth, world);
                 }
 
                 try write_color(&stdout, vec3_splat(self.pixel_samples_scale) * pixel_color);
@@ -155,18 +186,17 @@ const Camera = struct {
     }
 
     fn sample_square() vec3 {
-        return vec3{ std.crypto.random.float(f32) - 0.5, std.crypto.random.float(f32) - 0.5, 0 };
+        return vec3{ rtweekend.random_double() - 0.5, rtweekend.random_double() - 0.5, 0 };
     }
 
-    fn ray_color(self: *Camera, ray: Ray, world: *const Hittable) color {
-        _ = self;
+    fn ray_color(self: *Camera, ray: Ray, depth: u32, world: *const Hittable) color {
+        if (depth <= 0) {
+            return color{ 0, 0, 0 };
+        }
         var rec: HitRecord = undefined;
-        if (world.hit(ray, Interval.init(0, rtweekend.infinity), &rec)) {
-            return vec3_splat(0.5) * (rec.normal + color{
-                1,
-                1,
-                1,
-            });
+        if (world.hit(ray, Interval.init(0.001, rtweekend.infinity), &rec)) {
+            const direction = random_on_hemisphere(rec.normal);
+            return vec3_splat(0.5) * ray_color(self, Ray.init(rec.p, direction), depth - 1, world);
         }
 
         const unit_direction = unit_vector(ray.direction());
@@ -329,6 +359,7 @@ pub fn main() !void {
     cam.aspect_ratio = 16.0 / 9.0;
     cam.image_width = 400;
     cam.samples_per_pixel = 100;
+    cam.max_depth = 50;
 
     try cam.render(&world);
 }
