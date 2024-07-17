@@ -324,13 +324,16 @@ const Lambertian = struct {
 
 const Metal = struct {
     albedo: color,
+    fuzz: f32,
 
-    pub fn init(albedo: color) Metal {
-        return .{ .albedo = albedo };
+    pub fn init(albedo: color, fuzz: f32) Metal {
+        return .{ .albedo = albedo, .fuzz = if (fuzz < 1) fuzz else 1 };
     }
 
     pub fn scatter(self: *const Metal, r_in: Ray, rec: *HitRecord, attenuation: *color, scattered: *Ray) bool {
-        const reflected = reflect(r_in.direction(), rec.normal);
+        var reflected = reflect(r_in.direction(), rec.normal);
+        // fuzz factor
+        reflected = unit_vector(reflected) + (vec3_splat(self.fuzz) * random_unit_vector());
         scattered.* = Ray.init(rec.p, reflected);
         attenuation.* = self.albedo;
         return true;
@@ -451,8 +454,8 @@ pub fn main() !void {
     var world = Hittable.init(&world_list);
     const material_ground = Material.init(&Lambertian.init(color{ 0.8, 0.8, 0.0 }));
     const material_center = Material.init(&Lambertian.init(color{ 0.1, 0.2, 0.5 }));
-    const material_left = Material.init(&Metal.init(color{ 0.8, 0.8, 0.8 }));
-    const material_right = Material.init(&Metal.init(color{ 0.8, 0.6, 0.2 }));
+    const material_left = Material.init(&Metal.init(color{ 0.8, 0.8, 0.8 }, 0.3));
+    const material_right = Material.init(&Metal.init(color{ 0.8, 0.6, 0.2 }, 1.0));
     const sphere1 = Hittable.init(&Sphere.init(point3{ 0, -100.5, -1 }, 100, material_ground));
     const sphere2 = Hittable.init(&Sphere.init(point3{ 0, 0, -1.2 }, 0.5, material_center));
     const sphere3 = Hittable.init(&Sphere.init(point3{ -1.0, 0, -1.0 }, 0.5, material_left));
