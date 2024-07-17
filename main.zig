@@ -85,6 +85,13 @@ fn reflect(v: vec3, n: vec3) vec3 {
     return v - vec3_splat(2 * dot(v, n)) * n;
 }
 
+fn refract(uv: vec3, n: vec3, etai_over_etat: f32) vec3 {
+    const cos_theta = @min(dot(-uv, n), 1.0);
+    const r_out_perp = vec3_splat(etai_over_etat) * (uv + vec3_splat(cos_theta) * n);
+    const r_out_parallel = vec3_splat(-math.sqrt(@abs(1.0 - length_squared(r_out_perp)))) * n;
+    return r_out_perp + r_out_parallel;
+}
+
 fn length_squared(u: vec3) f32 {
     return u[0] * u[0] + u[1] * u[1] + u[2] * u[2];
 }
@@ -340,6 +347,38 @@ const Metal = struct {
     }
 };
 
+const Dialectric = struct {
+    refraction_index: f32,
+    pub fn init(refraction_index: f32) Dialectric {
+        return .{ .refraction_index = refraction_index };
+    }
+
+    pub fn scatter(self: *const Dialectric, r_in: Ray, rec: *HitRecord, attenuation: *color, scattered: *Ray) bool {
+        attenuation.* = color{ 1.0, 1.0, 1.0 };
+        const ri = if (rec.front_face) (1.0 / self.refraction_index) else self.refraction_index;
+        const unit_direction = unit_vector(r_in.direction());
+        const cos_theta = @min(dot(-unit_direction, rec.normal), 1.0);
+        const sin_theta = math.sqrt(1.0 - cos_theta * cos_theta);
+
+        const cannot_refract = ri * sin_theta > 1.0;
+        var direction: vec3 = undefined;
+
+        if (cannot_refract or reflectance(cos_theta, ri) > rtweekend.random_double()) {
+            direction = reflect(unit_direction, rec.normal);
+        } else {
+            direction = refract(unit_direction, rec.normal, ri);
+        }
+        scattered.* = Ray.init(rec.p, direction);
+        return true;
+    }
+
+    // Schlick's approximation for reflectance
+    fn reflectance(cosine: f32, refraction_index: f32) f32 {
+        var r0 = (1 - refraction_index) / (1 + refraction_index);
+        r0 = r0 * r0;
+        return r0 + (1 - r0) * math.pow(f32, (1 - cosine), 5);
+    }
+};
 const Hittable = struct {
     ptr: *anyopaque,
     vtab: *const Vtab,
@@ -454,15 +493,18 @@ pub fn main() !void {
     var world = Hittable.init(&world_list);
     const material_ground = Material.init(&Lambertian.init(color{ 0.8, 0.8, 0.0 }));
     const material_center = Material.init(&Lambertian.init(color{ 0.1, 0.2, 0.5 }));
-    const material_left = Material.init(&Metal.init(color{ 0.8, 0.8, 0.8 }, 0.3));
+    const material_left = Material.init(&Dialectric.init(1.50));
+    const material_bubble = Material.init(&Dialectric.init(1.00 / 1.50));
     const material_right = Material.init(&Metal.init(color{ 0.8, 0.6, 0.2 }, 1.0));
     const sphere1 = Hittable.init(&Sphere.init(point3{ 0, -100.5, -1 }, 100, material_ground));
     const sphere2 = Hittable.init(&Sphere.init(point3{ 0, 0, -1.2 }, 0.5, material_center));
     const sphere3 = Hittable.init(&Sphere.init(point3{ -1.0, 0, -1.0 }, 0.5, material_left));
+    const sphere3_inner = Hittable.init(&Sphere.init(point3{ -1.0, 0, -1.0 }, 0.4, material_bubble));
     const sphere4 = Hittable.init(&Sphere.init(point3{ 1.0, 0, -1.0 }, 0.5, material_right));
     try world_list.add(sphere1);
     try world_list.add(sphere2);
     try world_list.add(sphere3);
+    try world_list.add(sphere3_inner);
     try world_list.add(sphere4);
 
     var cam: Camera = undefined;
