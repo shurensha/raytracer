@@ -80,8 +80,18 @@ fn random_on_hemisphere(normal: vec3) vec3 {
     }
 }
 
+// reflected vector is v - 2b where b is the projection of v to n
+fn reflect(v: vec3, n: vec3) vec3 {
+    return v - vec3_splat(2 * dot(v, n)) * n;
+}
+
 fn length_squared(u: vec3) f32 {
     return u[0] * u[0] + u[1] * u[1] + u[2] * u[2];
+}
+
+fn near_zero(u: vec3) bool {
+    const s = 1e-8;
+    return @abs(u[0]) < s and @abs(u[1]) < s and @abs(u[2]) < s;
 }
 
 fn random() vec3 {
@@ -92,10 +102,22 @@ fn random_range(min: f32, max: f32) vec3 {
     return vec3{ rtweekend.random_double_range(min, max), rtweekend.random_double_range(min, max), rtweekend.random_double_range(min, max) };
 }
 
+fn linear_to_gamma(linear_component: f32) f32 {
+    if (linear_component > 0) {
+        return math.sqrt(linear_component);
+    }
+
+    return 0;
+}
+
 fn write_color(out: anytype, c: color) !void {
-    const r = c[0];
-    const g = c[1];
-    const b = c[2];
+    var r = c[0];
+    var g = c[1];
+    var b = c[2];
+
+    r = linear_to_gamma(r);
+    g = linear_to_gamma(g);
+    b = linear_to_gamma(b);
 
     const intensity = Interval.init(0.000, 0.999);
     const rbyte = std.math.lossyCast(u8, 256 * intensity.clamp(r));
@@ -195,8 +217,12 @@ const Camera = struct {
         }
         var rec: HitRecord = undefined;
         if (world.hit(ray, Interval.init(0.001, rtweekend.infinity), &rec)) {
-            const direction = random_on_hemisphere(rec.normal);
-            return vec3_splat(0.5) * ray_color(self, Ray.init(rec.p, direction), depth - 1, world);
+            var scattered: Ray = undefined;
+            var attenuation: color = undefined;
+            if (rec.mat.scatter(ray, &rec, &attenuation, &scattered)) {
+                return attenuation * self.ray_color(scattered, depth - 1, world);
+            }
+            return color{ 0, 0, 0 };
         }
 
         const unit_direction = unit_vector(ray.direction());
@@ -234,12 +260,80 @@ const Ray = struct {
 const HitRecord = struct {
     p: point3,
     normal: vec3,
+    mat: Material,
     t: f32,
     front_face: bool,
 
     pub fn set_face_normal(self: *HitRecord, r: Ray, outward_normal: vec3) void {
         self.front_face = dot(r.direction(), outward_normal) < 0;
         self.normal = if (self.front_face) outward_normal else -outward_normal;
+    }
+};
+
+const Material = struct {
+    ptr: *anyopaque,
+    vtab: *const Vtab,
+    const Vtab = struct {
+        scatter: *const fn (self: *const anyopaque, r_in: Ray, rec: *HitRecord, attenuation: *color, scattered: *Ray) bool,
+    };
+
+    pub fn scatter(self: *const Material, r_in: Ray, rec: *HitRecord, attenuation: *color, scattered: *Ray) bool {
+        return self.vtab.scatter(self.ptr, r_in, rec, attenuation, scattered);
+    }
+
+    pub fn init(obj: anytype) Material {
+        const Ptr = @TypeOf(obj);
+        const PtrInfo = @typeInfo(Ptr);
+        assert(PtrInfo == .Pointer);
+        assert(PtrInfo.Pointer.size == .One);
+        assert(@typeInfo(PtrInfo.Pointer.child) == .Struct);
+        const impl = struct {
+            fn scatter(ptr: *const anyopaque, r_in: Ray, rec: *HitRecord, attenuation: *color, scattered: *Ray) bool {
+                const self: Ptr = @ptrCast(@alignCast(ptr));
+                return self.scatter(r_in, rec, attenuation, scattered);
+            }
+        };
+        return .{
+            .ptr = @constCast(obj),
+            .vtab = &.{
+                .scatter = impl.scatter,
+            },
+        };
+    }
+};
+
+const Lambertian = struct {
+    albedo: color,
+
+    pub fn init(albedo: color) Lambertian {
+        return .{ .albedo = albedo };
+    }
+
+    pub fn scatter(self: *const Lambertian, r_in: Ray, rec: *HitRecord, attenuation: *color, scattered: *Ray) bool {
+        _ = r_in;
+        var scatter_direction = rec.normal + random_unit_vector();
+
+        if (near_zero(scatter_direction)) {
+            scatter_direction = rec.normal;
+        }
+        scattered.* = Ray.init(rec.p, scatter_direction);
+        attenuation.* = self.albedo;
+        return true;
+    }
+};
+
+const Metal = struct {
+    albedo: color,
+
+    pub fn init(albedo: color) Metal {
+        return .{ .albedo = albedo };
+    }
+
+    pub fn scatter(self: *const Metal, r_in: Ray, rec: *HitRecord, attenuation: *color, scattered: *Ray) bool {
+        const reflected = reflect(r_in.direction(), rec.normal);
+        scattered.* = Ray.init(rec.p, reflected);
+        attenuation.* = self.albedo;
+        return true;
     }
 };
 
@@ -306,10 +400,13 @@ const HittableList = struct {
 const Sphere = struct {
     center: point3,
     radius: f32,
-    pub fn init(center: point3, radius: f32) Sphere {
+
+    mat: Material,
+    pub fn init(center: point3, radius: f32, mat: Material) Sphere {
         return Sphere{
             .center = center,
             .radius = @max(0, radius),
+            .mat = mat,
         };
     }
 
@@ -340,6 +437,7 @@ const Sphere = struct {
         rec.*.p = r.at(rec.t);
         const outward_normal = (rec.p - self.center) / vec3_splat(self.radius);
         rec.*.set_face_normal(r, outward_normal);
+        rec.*.mat = self.mat;
 
         return true;
     }
@@ -348,12 +446,21 @@ const Sphere = struct {
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
+
     var world_list = HittableList.init(allocator);
     var world = Hittable.init(&world_list);
-    const sphere1 = Hittable.init(&Sphere.init(point3{ 0, 0, -1 }, 0.5));
-    const sphere2 = Hittable.init(&Sphere.init(point3{ 0, -100.5, -1 }, 100));
+    const material_ground = Material.init(&Lambertian.init(color{ 0.8, 0.8, 0.0 }));
+    const material_center = Material.init(&Lambertian.init(color{ 0.1, 0.2, 0.5 }));
+    const material_left = Material.init(&Metal.init(color{ 0.8, 0.8, 0.8 }));
+    const material_right = Material.init(&Metal.init(color{ 0.8, 0.6, 0.2 }));
+    const sphere1 = Hittable.init(&Sphere.init(point3{ 0, -100.5, -1 }, 100, material_ground));
+    const sphere2 = Hittable.init(&Sphere.init(point3{ 0, 0, -1.2 }, 0.5, material_center));
+    const sphere3 = Hittable.init(&Sphere.init(point3{ -1.0, 0, -1.0 }, 0.5, material_left));
+    const sphere4 = Hittable.init(&Sphere.init(point3{ 1.0, 0, -1.0 }, 0.5, material_right));
     try world_list.add(sphere1);
     try world_list.add(sphere2);
+    try world_list.add(sphere3);
+    try world_list.add(sphere4);
 
     var cam: Camera = undefined;
     cam.aspect_ratio = 16.0 / 9.0;
